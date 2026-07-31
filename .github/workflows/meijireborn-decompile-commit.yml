@@ -1,0 +1,76 @@
+name: MeijiReborn decompile and commit
+
+on:
+  push:
+    branches:
+      - chatgpt/meijireborn-neoforge-1.21.1
+    paths-ignore:
+      - 'decompiled/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  decompile-and-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/meijireborn-neoforge-1.21.1
+          fetch-depth: 0
+
+      - name: Restore exact bytecode
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          mkdir -p work/classes
+          cat input/classes.tar.xz.b64.part-* | base64 --decode > work/classes.tar.xz
+          echo "6ab7ae7f9a7cef62a153d2db71b8e48720691356651fbe4d65271e4d240274b1  work/classes.tar.xz" | sha256sum --check
+          tar -xJf work/classes.tar.xz -C work/classes
+          count=$(find work/classes/com/meijireborn -name '*.class' | wc -l)
+          echo "Restored $count classes"
+          test "$count" -ge 60
+          (cd work/classes && jar cf ../code-only.jar com)
+          unzip -t work/code-only.jar
+
+      - name: Download CFR 0.152
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --output work/cfr.jar https://www.benf.org/other/cfr/cfr-0.152.jar
+          java -jar work/cfr.jar --version
+
+      - name: Decompile all MeijiReborn classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/decompiled
+          java -jar work/cfr.jar work/code-only.jar \
+            --outputdir work/decompiled \
+            --silent true \
+            --clobber true \
+            --caseinsensitivefs true
+          test -f work/decompiled/com/meijireborn/SengokuReborn.java
+          rm -rf decompiled
+          mkdir -p decompiled
+          cp -a work/decompiled/com decompiled/
+          find decompiled -name '*.java' -print | sort > decompiled/FILES.txt
+          sha256sum work/code-only.jar work/classes.tar.xz > decompiled/INPUT-SHA256.txt
+          printf '%s\n' 'Generated from the exact uploaded v0.33.4.3 bytecode with CFR 0.152.' > decompiled/README.txt
+
+      - name: Commit decompiled sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add decompiled
+          if git diff --cached --quiet; then
+            echo "No decompiled-source changes"
+            exit 0
+          fi
+          git commit -m "Add exact decompiled MeijiReborn sources [skip ci]"
+          git push origin HEAD:chatgpt/meijireborn-neoforge-1.21.1
