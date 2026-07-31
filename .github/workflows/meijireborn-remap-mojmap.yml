@@ -1,0 +1,145 @@
+name: MeijiReborn remap to Mojmap and commit
+
+on:
+  push:
+    branches:
+      - chatgpt/meijireborn-neoforge-1.21.1
+    paths-ignore:
+      - 'decompiled/**'
+      - 'mojmap-decompiled/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  remap-and-decompile:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/meijireborn-neoforge-1.21.1
+          fetch-depth: 0
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Restore exact input classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work loom-remap
+          mkdir -p work/classes loom-remap/src/main/java
+          cat input/classes.tar.xz.b64.part-* | base64 --decode > work/classes.tar.xz
+          echo "6ab7ae7f9a7cef62a153d2db71b8e48720691356651fbe4d65271e4d240274b1  work/classes.tar.xz" | sha256sum --check
+          tar -xJf work/classes.tar.xz -C work/classes
+          cat > work/classes/fabric.mod.json <<'JSON'
+          {
+            "schemaVersion": 1,
+            "id": "meiji_port_input",
+            "version": "0.33.4.3",
+            "name": "Meiji port input",
+            "environment": "*"
+          }
+          JSON
+          (cd work/classes && jar cf ../code-only.jar com fabric.mod.json)
+          unzip -t work/code-only.jar
+
+      - name: Configure temporary Loom remapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > loom-remap/settings.gradle <<'GRADLE'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  gradlePluginPortal()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'meiji-remap'
+          GRADLE
+          cat > loom-remap/build.gradle <<'GRADLE'
+          plugins {
+              id 'fabric-loom' version '1.7.4'
+          }
+
+          group = 'com.meijireborn.port'
+          version = '0.33.4.3'
+
+          repositories {
+              mavenCentral()
+              maven { url = 'https://maven.fabricmc.net/' }
+          }
+
+          dependencies {
+              minecraft 'com.mojang:minecraft:1.21.1'
+              mappings loom.officialMojangMappings()
+              modImplementation 'net.fabricmc:fabric-loader:0.16.14'
+              modImplementation files('../work/code-only.jar')
+          }
+          GRADLE
+          cat > loom-remap/gradle.properties <<'PROPS'
+          org.gradle.jvmargs=-Xmx4G
+          org.gradle.parallel=false
+          org.gradle.daemon=false
+          PROPS
+
+      - name: Resolve and remap intermediary dependency to Mojmap
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd loom-remap
+          gradle --no-daemon --stacktrace classes
+          cd ..
+          mkdir -p work/candidates
+          while IFS= read -r -d '' jarfile; do
+            if unzip -l "$jarfile" 2>/dev/null | grep -q 'com/meijireborn/SengokuReborn.class'; then
+              cp "$jarfile" "work/candidates/$(echo "$jarfile" | sha256sum | cut -c1-16)-$(basename "$jarfile")"
+            fi
+          done < <(find loom-remap/.gradle "$HOME/.gradle/caches/fabric-loom" -type f -name '*.jar' -print0 2>/dev/null)
+          ls -lah work/candidates
+          candidate=$(find work/candidates -type f -name '*.jar' | head -n 1)
+          test -n "$candidate"
+          cp "$candidate" work/meijireborn-mojmap.jar
+          unzip -t work/meijireborn-mojmap.jar
+          javap -classpath work/meijireborn-mojmap.jar -verbose com.meijireborn.SengokuReborn > work/remap-check.txt
+          if grep -q 'net/minecraft/class_' work/remap-check.txt; then
+            echo 'Intermediary names remain in remapped output' >&2
+            exit 1
+          fi
+
+      - name: Decompile Mojmap bytecode
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --output work/cfr.jar https://www.benf.org/other/cfr/cfr-0.152.jar
+          rm -rf work/mojmap-decompiled mojmap-decompiled
+          mkdir -p work/mojmap-decompiled mojmap-decompiled
+          java -jar work/cfr.jar work/meijireborn-mojmap.jar \
+            --outputdir work/mojmap-decompiled \
+            --silent true \
+            --clobber true \
+            --caseinsensitivefs true
+          test -f work/mojmap-decompiled/com/meijireborn/SengokuReborn.java
+          cp -a work/mojmap-decompiled/com mojmap-decompiled/
+          find mojmap-decompiled -name '*.java' -print | sort > mojmap-decompiled/FILES.txt
+          sha256sum work/code-only.jar work/meijireborn-mojmap.jar work/classes.tar.xz > mojmap-decompiled/INPUT-SHA256.txt
+          cp work/remap-check.txt mojmap-decompiled/REMAP-CHECK.txt
+          printf '%s\n' 'Generated from the exact v0.33.4.3 bytecode, remapped from Fabric intermediary names to official Mojang names with Loom, then decompiled with CFR 0.152.' > mojmap-decompiled/README.txt
+
+      - name: Commit Mojmap decompiled sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mojmap-decompiled
+          if git diff --cached --quiet; then
+            echo 'No Mojmap source changes'
+            exit 0
+          fi
+          git commit -m 'Add Mojmap-remapped MeijiReborn sources [skip ci]'
+          git push origin HEAD:chatgpt/meijireborn-neoforge-1.21.1
