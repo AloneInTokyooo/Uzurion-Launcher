@@ -1,0 +1,55 @@
+name: MeijiReborn bytecode decompile
+
+on:
+  push:
+    branches:
+      - chatgpt/meijireborn-neoforge-1.21.1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  decompile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore bytecode input
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/classes
+          cat input/classes.tar.xz.b64.part-* | base64 --decode > work/classes.tar.xz
+          echo "6ab7ae7f9a7cef62a153d2db71b8e48720691356651fbe4d65271e4d240274b1  work/classes.tar.xz" | sha256sum --check
+          tar -xJf work/classes.tar.xz -C work/classes
+          count=$(find work/classes/com/meijireborn -name '*.class' | wc -l)
+          echo "Restored $count MeijiReborn classes"
+          test "$count" -ge 60
+          (cd work/classes && jar cf ../code-only.jar com)
+          unzip -t work/code-only.jar
+
+      - name: Download CFR 0.152
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --output work/cfr.jar https://www.benf.org/other/cfr/cfr-0.152.jar
+          java -jar work/cfr.jar --version
+
+      - name: Decompile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/decompiled
+          java -jar work/cfr.jar work/code-only.jar --outputdir work/decompiled --silent true --clobber true --caseinsensitivefs true
+          test -f work/decompiled/com/meijireborn/SengokuReborn.java
+          find work/decompiled -name '*.java' -print | sort > work/decompiled-files.txt
+          zip -qr work/meijireborn-decompiled.zip work/decompiled work/decompiled-files.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meijireborn-decompiled
+          path: |
+            work/meijireborn-decompiled.zip
+            work/decompiled-files.txt
+          retention-days: 7
